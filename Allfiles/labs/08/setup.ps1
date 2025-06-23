@@ -47,6 +47,10 @@ $spId = (Get-AzADServicePrincipal -DisplayName $synapseWorkspace).Id
 New-AzRoleAssignment -ObjectId $spId -RoleDefinitionName "Storage Blob Data Owner" -Scope "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName/providers/Microsoft.Storage/storageAccounts/$dataLakeAccountName" -ErrorAction SilentlyContinue
 New-AzRoleAssignment -SignInName $userName -RoleDefinitionName "Storage Blob Data Owner" -Scope "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName/providers/Microsoft.Storage/storageAccounts/$dataLakeAccountName" -ErrorAction SilentlyContinue
 
+# Create database
+write-host "Creating the $sqlDatabaseName database..."
+sqlcmd -S "$synapseWorkspace.sql.azuresynapse.net" -U $sqlUser -P $sqlPassword -d $sqlDatabaseName -I -i setup.sql
+
 # 데이터 로드
 Write-Host "Loading data to $sqlDatabaseName ..."
 Get-ChildItem "./data/*.txt" -File | ForEach-Object {
