@@ -56,9 +56,9 @@ Get-ChildItem "./data/*.txt" -File | ForEach-Object {
     bcp dbo.$table in $file -S "$synapseWorkspace.sql.azuresynapse.net" -U $sqlUser -P $sqlPassword -d $sqlDatabaseName -f $file.Replace("txt", "fmt") -q -k -E -b 5000
 }
 
-# SQL Pool 일시 중지
-#Write-Host "Pausing the $sqlDatabaseName SQL Pool..."
-#Suspend-AzSynapseSqlPool -WorkspaceName $synapseWorkspace -Name $sqlDatabaseName -AsJob
+# SQL Pool 일시 중지 (요청에 따라 주석 처리)
+# Write-Host "Pausing the $sqlDatabaseName SQL Pool..."
+# Suspend-AzSynapseSqlPool -WorkspaceName $synapseWorkspace -Name $sqlDatabaseName -AsJob
 
 # 스크립트 업로드
 $solutionScriptPath = "Solution.sql"
