@@ -228,17 +228,25 @@ Write-Host "The selected Dedicated SQL Pool '$sqlPoolName' on server '$sqlPoolSe
 Write-Host "The name '$newSqlDatabaseName' provided earlier might be used by 'setup.sql' for schema creation or other logical structuring if 'setup.sql' is designed that way."
 
 # setup.sql 실행 (테이블 생성 등)
-if (-not (Test-Path ".\setup.sql")) {
-    Write-Warning ".\setup.sql file not found. Skipping table creation."
+$setupSqlPath = Join-Path $PSScriptRoot "setup.sql" # 스크립트 파일과 동일한 디렉터리에 있는 setup.sql 경로
+
+if (-not (Test-Path $setupSqlPath)) {
+    Write-Warning "$setupSqlPath file not found. Skipping table creation."
 } else {
-    write-host "Running setup.sql in the Dedicated SQL Pool '$sqlPoolName'..."
-    # Invoke-Sqlcmd 실행 시 $sqlPassword 변수 사용
-    Invoke-Sqlcmd -ServerInstance $sqlPoolServerName -Username $sqlUser -Password $sqlPassword -Database $sqlPoolName -InputFile ".\setup.sql" -QueryTimeout 0
-    if ($LASTEXITCODE -ne 0 -and $Error.Count -gt 0) {
-        Write-Error "Failed to run setup.sql in Dedicated SQL Pool '$sqlPoolName'. Check errors above."
-        exit
+    write-host "Running setup.sql (from $setupSqlPath) in the Dedicated SQL Pool '$sqlPoolName'..."
+    try {
+        # -ErrorAction Stop을 추가하여 오류 발생 시 catch 블록으로 넘어가도록 함
+        Invoke-Sqlcmd -ServerInstance $sqlPoolServerName -Username $sqlUser -Password $sqlPassword -Database $sqlPoolName -InputFile $setupSqlPath -QueryTimeout 0 -ErrorAction Stop
+        Write-Host "setup.sql executed successfully in '$sqlPoolName'."
     }
-    Write-Host "setup.sql executed successfully in '$sqlPoolName'."
+    catch {
+        Write-Error "Failed to run setup.sql in Dedicated SQL Pool '$sqlPoolName'."
+        Write-Error "Error details: $($_.Exception.Message)"
+        # 전체 오류 객체를 보고 싶다면:
+        # Write-Error ($Error[0] | Format-List -Force | Out-String)
+        # 스크립트 중단
+        exit 1 # 0이 아닌 종료 코드로 실패를 알림
+    }
 }
 
 
