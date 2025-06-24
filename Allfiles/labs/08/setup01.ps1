@@ -178,9 +178,9 @@ while ([string]::IsNullOrWhiteSpace($sqlPassword)) {
 }
 
 # Test connection to SQL pool
-Write-Host "Testing connection to SQL pool..."
-$serverName = "$synapseWorkspaceName-ondemand.sql.azuresynapse.net"
-$dedicatedServerName = "$synapseWorkspaceName.sql.azuresynapse.net"
+#Write-Host "Testing connection to SQL pool..."
+#$serverName = "$synapseWorkspaceName-ondemand.sql.azuresynapse.net"
+#$dedicatedServerName = "$synapseWorkspaceName.sql.azuresynapse.net"
 
 try {
     # Test connection using sqlcmd with modern syntax
