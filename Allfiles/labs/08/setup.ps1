@@ -1,265 +1,290 @@
 Clear-Host
-Write-Host "Starting script at $(Get-Date)"
+write-host "Starting script at $(Get-Date)"
 
-# Ensure Az.Synapse module is available
-Write-Host "Checking for Az.Synapse module and installing if necessary..."
-Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-Install-Module -Name Az.Synapse -Force -Scope CurrentUser
+# Az.Synapse 모듈이 이미 설치되어 있다고 가정합니다. 필요시 주석 해제하거나 설치 확인 로직 추가.
+# Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+# Install-Module -Name Az.Synapse -Force
 
-# Connect to Azure and select subscription
-Try {
-    Connect-AzAccount -ErrorAction Stop
-} Catch {
-    Write-Error "Failed to connect to Azure. Please ensure you are logged in via Connect-AzAccount."
-    Exit
+# --- 기존 구독 선택 로직 유지 ---
+$subs = Get-AzSubscription | Select-Object
+if($subs.GetType().IsArray -and $subs.length -gt 1){
+        Write-Host "You have multiple Azure subscriptions - please select the one you want to use:"
+        for($i = 0; $i -lt $subs.length; $i++)
+        {
+                Write-Host "[$($i)]: $($subs[$i].Name) (ID = $($subs[$i].Id))"
+        }
+        $selectedIndex = -1
+        $selectedValidIndex = 0
+        while ($selectedValidIndex -ne 1)
+        {
+                $enteredValue = Read-Host("Enter 0 to $($subs.Length - 1)")
+                if (-not ([string]::IsNullOrEmpty($enteredValue)))
+                {
+                    if ([int]$enteredValue -in (0..$($subs.Length - 1)))
+                    {
+                        $selectedIndex = [int]$enteredValue
+                        $selectedValidIndex = 1
+                    }
+                    else
+                    {
+                        Write-Output "Please enter a valid subscription number."
+                    }
+                }
+                else
+                {
+                    Write-Output "Please enter a valid subscription number."
+                }
+        }
+        $selectedSub = $subs[$selectedIndex].Id
+        Select-AzSubscription -SubscriptionId $selectedSub
+        az account set --subscription $selectedSub
+        Write-Host "Selected subscription: $($subs[$selectedIndex].Name)"
+} elseif ($subs) {
+    Select-AzSubscription -SubscriptionId $subs.Id
+    az account set --subscription $subs.Id
+    Write-Host "Using subscription: $($subs.Name)"
+} else {
+    Write-Error "No Azure subscriptions found. Please log in to Azure."
+    exit
 }
 
-$subs = Get-AzSubscription | Select-Object Name, Id
-if ($null -eq $subs) {
-    Write-Error "No Azure subscriptions found. Please check your Azure account."
-    Exit
+
+# --- 사용자로부터 리소스 그룹 정보 입력 받기 ---
+Write-Host ""
+$resourceGroupName = Read-Host "Enter the name of your existing Resource Group"
+if (-not (Get-AzResourceGroup -Name $resourceGroupName -ErrorAction SilentlyContinue)) {
+    Write-Error "Resource Group '$resourceGroupName' not found. Please check the name and try again."
+    exit
 }
 
-if ($subs.GetType().IsArray -and $subs.length -gt 1) {
-    Write-Host "You have multiple Azure subscriptions - please select the one you want to use:"
-    for ($i = 0; $i -lt $subs.length; $i++) {
-        Write-Host "[$($i)]: $($subs[$i].Name) (ID = $($subs[$i].Id))"
+# --- Synapse Workspace 검색 및 선택 ---
+Write-Host ""
+Write-Host "Searching for Synapse Workspaces in Resource Group '$resourceGroupName'..."
+$synapseWorkspaces = Get-AzSynapseWorkspace -ResourceGroupName $resourceGroupName
+if (-not $synapseWorkspaces) {
+    Write-Error "No Synapse Workspaces found in Resource Group '$resourceGroupName'."
+    exit
+}
+
+$synapseWorkspaceName = ""
+if ($synapseWorkspaces.Count -eq 1) {
+    $synapseWorkspaceName = $synapseWorkspaces[0].Name
+    Write-Host "Automatically selected Synapse Workspace: $synapseWorkspaceName"
+} else {
+    Write-Host "Multiple Synapse Workspaces found. Please select one:"
+    for ($i = 0; $i -lt $synapseWorkspaces.Count; $i++) {
+        Write-Host "[$i]: $($synapseWorkspaces[$i].Name)"
     }
     $selectedIndex = -1
     $selectedValidIndex = 0
     while ($selectedValidIndex -ne 1) {
-        $enteredValue = Read-Host ("Enter 0 to $($subs.Length - 1)")
+        $enteredValue = Read-Host ("Enter 0 to $($synapseWorkspaces.Count - 1)")
         if (-not ([string]::IsNullOrEmpty($enteredValue))) {
-            if ($enteredValue -match "^\d+$" -and [int]$enteredValue -ge 0 -and [int]$enteredValue -lt $subs.Length) {
+            if ([int]$enteredValue -in (0..($synapseWorkspaces.Count - 1))) {
                 $selectedIndex = [int]$enteredValue
                 $selectedValidIndex = 1
             } else {
-                Write-Warning "Please enter a valid subscription number."
+                Write-Output "Please enter a valid number."
             }
         } else {
-            Write-Warning "Please enter a valid subscription number."
+            Write-Output "Please enter a valid number."
         }
     }
-    $selectedSub = $subs[$selectedIndex].Id
-    Select-AzSubscription -SubscriptionId $selectedSub
-    # az account set --subscription $selectedSub # For Azure CLI commands if used elsewhere
-} elseif ($subs) {
-    # Only one subscription
-    $selectedSub = $subs.Id
-    Select-AzSubscription -SubscriptionId $selectedSub
-    # az account set --subscription $selectedSub
-    Write-Host "Using subscription: $($subs.Name) (ID = $selectedSub)"
-}
-Write-Host "Using Azure Context: $((Get-AzContext).Name)"
-
-
-# 1. Prompt user for Resource Group name
-$resourceGroupName = ""
-while ([string]::IsNullOrWhiteSpace($resourceGroupName)) {
-    $resourceGroupNameInput = Read-Host "Enter the name of your existing Azure Resource Group"
-    if (-not [string]::IsNullOrWhiteSpace($resourceGroupNameInput)) {
-        if (Get-AzResourceGroup -Name $resourceGroupNameInput -ErrorAction SilentlyContinue) {
-            $resourceGroupName = $resourceGroupNameInput
-            Write-Host "Using Resource Group: $resourceGroupName"
-        } else {
-            Write-Warning "Resource Group '$resourceGroupNameInput' not found. Please check the name and try again."
-        }
-    } else {
-        Write-Warning "Resource Group name cannot be empty."
-    }
+    $synapseWorkspaceName = $synapseWorkspaces[$selectedIndex].Name
+    Write-Host "Selected Synapse Workspace: $synapseWorkspaceName"
 }
 
-# 2. Find Synapse Workspace in the specified Resource Group
-Write-Host "Searching for Synapse Workspaces in Resource Group '$resourceGroupName'..."
-$synapseWorkspaces = Get-AzSynapseWorkspace -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
-
-if (-not $synapseWorkspaces -or $synapseWorkspaces.Count -eq 0) {
-    Write-Error "No Synapse Workspace found in Resource Group '$resourceGroupName'."
-    Exit
-}
-
-$synapseWorkspaceName = $null
-if ($synapseWorkspaces.Count -eq 1) {
-    $synapseWorkspaceName = $synapseWorkspaces[0].Name
-    Write-Host "Found Synapse Workspace: $synapseWorkspaceName"
-} else {
-    Write-Host "Multiple Synapse Workspaces found. Please select one:"
-    for ($i = 0; $i -lt $synapseWorkspaces.Count; $i++) {
-        Write-Host "[$i] $($synapseWorkspaces[$i].Name)"
-    }
-    $wsIndexInput = Read-Host "Enter the number of the Synapse Workspace to use"
-    if ($wsIndexInput -match "^\d+$" -and [int]$wsIndexInput -ge 0 -and [int]$wsIndexInput -lt $synapseWorkspaces.Count) {
-        $synapseWorkspaceName = $synapseWorkspaces[[int]$wsIndexInput].Name
-        Write-Host "Using Synapse Workspace: $synapseWorkspaceName"
-    } else {
-        Write-Error "Invalid selection for Synapse Workspace."
-        Exit
-    }
-}
-$synapseWorkspaceDetails = Get-AzSynapseWorkspace -ResourceGroupName $resourceGroupName -Name $synapseWorkspaceName
-$dedicatedServerName = "$($synapseWorkspaceName).sql.azuresynapse.net" # Endpoint for Dedicated SQL Pool
-
-# 3. Find Dedicated SQL Pool in the selected Synapse Workspace
+# --- Dedicated SQL Pool 검색 및 선택 ---
+Write-Host ""
 Write-Host "Searching for Dedicated SQL Pools in Synapse Workspace '$synapseWorkspaceName'..."
-$sqlPools = Get-AzSynapseSqlPool -ResourceGroupName $resourceGroupName -WorkspaceName $synapseWorkspaceName -ErrorAction SilentlyContinue
-
-if (-not $sqlPools -or $sqlPools.Count -eq 0) {
-    Write-Error "No Dedicated SQL Pool found in Synapse Workspace '$synapseWorkspaceName'."
-    Exit
+$sqlPools = Get-AzSynapseSqlPool -ResourceGroupName $resourceGroupName -WorkspaceName $synapseWorkspaceName
+if (-not $sqlPools) {
+    Write-Error "No Dedicated SQL Pools found in Synapse Workspace '$synapseWorkspaceName'."
+    exit
 }
 
-$sqlPoolName = $null
-$selectedSqlPool = $null
+$sqlPoolName = ""
 if ($sqlPools.Count -eq 1) {
-    $selectedSqlPool = $sqlPools[0]
-    $sqlPoolName = $selectedSqlPool.Name
-    Write-Host "Found Dedicated SQL Pool: $sqlPoolName (Status: $($selectedSqlPool.Status))"
+    $sqlPoolName = $sqlPools[0].Name
+    Write-Host "Automatically selected Dedicated SQL Pool: $sqlPoolName"
 } else {
     Write-Host "Multiple Dedicated SQL Pools found. Please select one:"
     for ($i = 0; $i -lt $sqlPools.Count; $i++) {
-        Write-Host "[$i] $($sqlPools[$i].Name) (Status: $($sqlPools[$i].Status))"
+        Write-Host "[$i]: $($sqlPools[$i].Name) (Status: $($sqlPools[$i].Status))"
     }
-    $poolIndexInput = Read-Host "Enter the number of the Dedicated SQL Pool to use"
-    if ($poolIndexInput -match "^\d+$" -and [int]$poolIndexInput -ge 0 -and [int]$poolIndexInput -lt $sqlPools.Count) {
-        $selectedSqlPool = $sqlPools[[int]$poolIndexInput]
-        $sqlPoolName = $selectedSqlPool.Name
-        Write-Host "Using Dedicated SQL Pool: $sqlPoolName (Status: $($selectedSqlPool.Status))"
-    } else {
-        Write-Error "Invalid selection for Dedicated SQL Pool."
-        Exit
-    }
-}
-
-# Resume SQL pool if it's paused
-if ($selectedSqlPool.Status -eq "Paused") {
-    Write-Host "SQL pool '$sqlPoolName' is paused. Resuming..."
-    Resume-AzSynapseSqlPool -WorkspaceName $synapseWorkspaceName -Name $sqlPoolName -ResourceGroupName $resourceGroupName
-    Write-Host "Waiting for SQL pool to resume..."
-    $currentStatusCheck = $null
-    do {
-        Start-Sleep -Seconds 15 # Check more frequently
-        $currentStatusCheck = (Get-AzSynapseSqlPool -WorkspaceName $synapseWorkspaceName -Name $sqlPoolName -ResourceGroupName $resourceGroupName).Status
-        Write-Host "Current status of '$sqlPoolName': $currentStatusCheck"
-    } while ($currentStatusCheck -ne "Online")
-    Write-Host "SQL pool '$sqlPoolName' is now online."
-}
-
-# 4. Prompt for SQL credentials
-Write-Host ""
-$sqlUser = ""
-while ([string]::IsNullOrWhiteSpace($sqlUser)) {
-    $sqlUser = Read-Host "Enter the SQL admin username for the dedicated SQL pool '$sqlPoolName'"
-    if ([string]::IsNullOrWhiteSpace($sqlUser)) {
-        Write-Warning "SQL username cannot be empty. Please enter a valid username."
-    }
-}
-
-$sqlPassword = ""
-while ([string]::IsNullOrWhiteSpace($sqlPassword)) {
-    # Password will be visible during input
-    $sqlPassword = Read-Host "Enter the password for user '$sqlUser' (password will be visible)"
-    if ([string]::IsNullOrWhiteSpace($sqlPassword)) {
-        Write-Warning "Password cannot be empty. Please enter a valid password."
-    }
-}
-Write-Output "Credentials for user '$sqlUser' accepted."
-
-# Test connection to SQL pool
-Write-Host "Testing connection to SQL pool '$sqlPoolName' on server '$dedicatedServerName'..."
-try {
-    $testQuery = "SELECT GETDATE() as CurrentTime;" # A simple query
-    # Use -b to ensure sqlcmd exits on error, -t for timeout
-    sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $sqlPoolName -Q $testQuery -h -1 -b -t 60 -I
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "Connection to SQL pool '$sqlPoolName' successful!"
-    } else {
-        Write-Error "Connection to SQL pool '$sqlPoolName' failed. SQLCMD Exit Code: $LASTEXITCODE. Please check credentials, server name, database name, and ensure the SQL pool is online and accessible."
-        Exit
-    }
-} catch {
-    Write-Error "Error testing connection to SQL pool '$sqlPoolName': $($_.Exception.Message)"
-    Exit
-}
-
-# THE DATABASE NAME IS THE SQL POOL NAME FOR DEDICATED SQL POOLS
-# No separate database name input needed. We use $sqlPoolName.
-
-# Create/setup database schema using setup.sql if it exists
-# The "database" for a dedicated SQL pool is the pool itself.
-$setupSqlPath = "./setup.sql"
-if (Test-Path $setupSqlPath) {
-    Write-Host "Running setup script '$setupSqlPath' on database (SQL Pool) '$sqlPoolName'..."
-    try {
-        # -d $sqlPoolName targets the dedicated SQL pool
-        sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $sqlPoolName -i $setupSqlPath -b -t 300 -I
-        Write-Host "Database setup script '$setupSqlPath' completed successfully on '$sqlPoolName'."
-    } catch {
-        Write-Error "Error running setup script '$setupSqlPath' on '$sqlPoolName': $($_.Exception.Message). SQLCMD Exit Code: $LASTEXITCODE"
-    }
-} else {
-    Write-Warning "Setup script '$setupSqlPath' not found. Skipping database schema setup."
-}
-
-# Load data if data files exist
-$dataPath = "./data"
-if (Get-ChildItem -Path "$dataPath/*.txt" -File -ErrorAction SilentlyContinue) {
-    Write-Host "Loading data into database (SQL Pool) '$sqlPoolName'..."
-    Get-ChildItem -Path "$dataPath/*.txt" -File | ForEach-Object {
-        $file = $_.FullName
-        $tableName = $_.Name.Replace(".txt", "")
-        $formatFile = $file.Replace(".txt", ".fmt")
-
-        Write-Host ""
-        Write-Host "Attempting to load data from '$file' into table 'dbo.$tableName'..."
-        try {
-            if (Test-Path $formatFile) {
-                Write-Host "Using format file: $formatFile"
-                bcp "dbo.$tableName" in "$file" -S $dedicatedServerName -U $sqlUser -P "$sqlPassword" -d "$sqlPoolName" -f "$formatFile" -q -k -E -b 5000 -t # Added -t for timeout
+    $selectedIndex = -1
+    $selectedValidIndex = 0
+    while ($selectedValidIndex -ne 1) {
+        $enteredValue = Read-Host ("Enter 0 to $($sqlPools.Count - 1)")
+        if (-not ([string]::IsNullOrEmpty($enteredValue))) {
+            if ([int]$enteredValue -in (0..($sqlPools.Count - 1))) {
+                $selectedIndex = [int]$enteredValue
+                $selectedValidIndex = 1
             } else {
-                Write-Warning "Format file '$formatFile' not found for '$file'. Using default comma-separated format (-c -t,)."
-                bcp "dbo.$tableName" in "$file" -S $dedicatedServerName -U $sqlUser -P "$sqlPassword" -d "$sqlPoolName" -c -t"," -q -k -E -b 5000 -t # Added -t for timeout
+                Write-Output "Please enter a valid number."
             }
-             if ($LASTEXITCODE -eq 0) {
-                Write-Host "Successfully loaded data into 'dbo.$tableName'."
-            } else {
-                Write-Error "BCP command failed for table 'dbo.$tableName' with exit code $LASTEXITCODE."
-            }
-        } catch {
-            Write-Error "Error loading data into 'dbo.$tableName' using BCP: $($_.Exception.Message)"
+        } else {
+            Write-Output "Please enter a valid number."
         }
     }
-    Write-Host "Data loading process completed."
-} else {
-    Write-Warning "No data files (*.txt) found in '$dataPath' directory. Skipping data loading."
+    $sqlPoolName = $sqlPools[$selectedIndex].Name
+    Write-Host "Selected Dedicated SQL Pool: $sqlPoolName"
 }
 
-# Upload solution script if it exists
-$solutionScriptPath = "./Solution.sql"
-$solutionScriptNameInSynapse = "SolutionUploaded_$(Get-Date -Format 'yyyyMMddHHmmss')" # Make script name unique in Synapse
+# --- 기존 Data Lake Storage Gen2 계정 이름 입력 받기 ---
+$dataLakeAccountName = Read-Host "Enter the name of your existing Data Lake Storage Gen2 account"
+if (-not (Get-AzStorageAccount -ResourceGroupName $resourceGroupName -Name $dataLakeAccountName -ErrorAction SilentlyContinue)) {
+    Write-Error "Data Lake Storage Gen2 account '$dataLakeAccountName' not found in Resource Group '$resourceGroupName'. Please check the name and try again."
+    exit
+}
 
-if (Test-Path $solutionScriptPath) {
-    Write-Host "Uploading solution script '$solutionScriptPath' as '$solutionScriptNameInSynapse' to Synapse workspace '$synapseWorkspaceName' associated with SQL Pool '$sqlPoolName'..."
-    try {
-        # For dedicated SQL pools, you associate the script with the pool.
-        # The -SqlDatabaseName parameter for Set-AzSynapseSqlScript might be more relevant for serverless SQL.
-        # However, if it's required for dedicated as well, using $sqlPoolName is appropriate.
-        $sqlPoolObject = Get-AzSynapseSqlPool -ResourceGroupName $resourceGroupName -WorkspaceName $synapseWorkspaceName -Name $sqlPoolName
-        Set-AzSynapseSqlScript -WorkspaceName $synapseWorkspaceName -Name $solutionScriptNameInSynapse -DefinitionFile $solutionScriptPath -SqlPool $sqlPoolObject -ErrorAction Stop
-        Write-Host "Solution script '$solutionScriptNameInSynapse' uploaded successfully."
-    } catch {
-        Write-Error "Failed to upload solution script '$solutionScriptPath'."
-        Write-Error $_.Exception.Message
+# --- SQL 관리자 자격 증명 입력 받기 ---
+Write-Host ""
+$sqlUser = Read-Host "Enter the SQL admin username for the Synapse SQL Pool '$sqlPoolName'"
+
+Write-Host ""
+Write-Host "Now, enter the password for the SQL Admin user '$sqlUser'."
+$sqlPassword = "" # 이 변수에 사용자가 입력한 검증된 암호가 할당됩니다.
+$complexPassword = 1
+while ($complexPassword -ne 1)
+{
+    # -AsSecureString 옵션을 사용하면 화면에 입력이 표시되지 않아 더 안전하지만,
+    # 이후 bcp 명령어 등에 전달하려면 일반 텍스트로 변환해야 하는 번거로움이 있습니다.
+    # 여기서는 원본 스크립트와 같이 일반 텍스트로 입력받되, 복잡성 검사를 수행합니다.
+    $enteredPassword = Read-Host -Prompt "Enter the password for '$sqlUser'.
+    `nThe password must meet complexity requirements:
+    `n - Minimum 8 characters.
+    `n - At least one upper case English letter [A-Z]
+    `n - At least one lower case English letter [a-z]
+    `n - At least one digit [0-9]
+    `n - At least one special character (!,@,#,%,^,&,$)
+    `n "
+
+    if (($enteredPassword -cmatch '[a-z]') -and `
+        ($enteredPassword -cmatch '[A-Z]') -and `
+        ($enteredPassword -match '\d') -and `
+        ($enteredPassword.length -ge 8) -and `
+        ($enteredPassword -match '[!@#%^&$]')) # PowerShell 특수문자 ^, & 는 백틱(`)으로 이스케이프하거나 작은 따옴표 안에 넣어야 합니다.
+    {
+        $sqlPassword = $enteredPassword # 검증된 암호를 $sqlPassword 변수에 할당
+        $complexPassword = 1
+	    Write-Output "Password accepted."
     }
-} else {
-    Write-Warning "Solution script '$solutionScriptPath' not found. Skipping script upload."
+    else
+    {
+        # 사용자가 입력한 값을 직접 노출하지 않도록 메시지 수정
+        Write-Output "The entered password does not meet the complexity requirements. Please try again."
+    }
 }
 
-Write-Host ""
-Write-Host "=== Summary ==="
-Write-Host "Resource Group: $resourceGroupName"
-Write-Host "Synapse Workspace: $synapseWorkspaceName"
-Write-Host "Dedicated SQL Pool (Database): $sqlPoolName"
-Write-Host "SQL Server Endpoint: $dedicatedServerName"
-Write-Host "SQL User: $sqlUser"
-Write-Host ""
-Write-Host "Script completed at $(Get-Date)"
+$newSqlDatabaseName = Read-Host "Enter the name for the NEW database to be created in the SQL Pool (e.g., SalesDB) - Note: For Dedicated SQL Pool, this might be used as a schema name by setup.sql"
+
+# --- 리소스 프로바이더 등록 (필요시 유지) ---
+Write-Host "Registering resource providers (if not already registered)...";
+$provider_list = "Microsoft.Synapse", "Microsoft.Sql", "Microsoft.Storage", "Microsoft.Compute"
+foreach ($provider in $provider_list){
+    $result = Get-AzResourceProvider -ProviderNamespace $provider
+    if ($result.RegistrationState -ne "Registered") {
+        Register-AzResourceProvider -ProviderNamespace $provider
+        Write-Host "$provider : Registered"
+    } else {
+        Write-Host "$provider : Already Registered"
+    }
+}
+
+# --- 데이터 레이크 저장소에 대한 권한 부여 (사용자 입력된 정보 사용) ---
+write-host "Granting permissions on the $dataLakeAccountName storage account..."
+write-host "(you can ignore any warnings if permissions already exist!)"
+$subscriptionId = (Get-AzContext).Subscription.Id
+$userName = ""
+try {
+    $currentUser = az ad signed-in-user show --query userPrincipalName -o tsv
+    if ($currentUser) {
+        $userName = $currentUser
+    } else {
+        Write-Warning "Could not retrieve current user UPN via 'az ad signed-in-user show'. You may need to grant permissions manually or ensure Azure CLI is logged in."
+    }
+} catch {
+    Write-Warning "Error retrieving current user UPN via 'az ad signed-in-user show': $($_.Exception.Message). You may need to grant permissions manually."
+}
+
+$synapseWorkspaceObj = Get-AzSynapseWorkspace -ResourceGroupName $resourceGroupName -Name $synapseWorkspaceName
+$synapseMIPrincipalId = $synapseWorkspaceObj.Identity.PrincipalId
+
+if (-not $synapseMIPrincipalId) {
+    Write-Error "Failed to get Managed Identity Principal ID for Synapse Workspace '$synapseWorkspaceName'"
+    exit
+}
+
+New-AzRoleAssignment -ObjectId $synapseMIPrincipalId -RoleDefinitionName "Storage Blob Data Contributor" -Scope "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName/providers/Microsoft.Storage/storageAccounts/$dataLakeAccountName" -ErrorAction SilentlyContinue;
+if ($userName) {
+    New-AzRoleAssignment -SignInName $userName -RoleDefinitionName "Storage Blob Data Contributor" -Scope "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName/providers/Microsoft.Storage/storageAccounts/$dataLakeAccountName" -ErrorAction SilentlyContinue;
+}
+
+# --- Dedicated SQL Pool 작업 준비 ---
+$sqlPoolServerName = "$synapseWorkspaceName.sql.azuresynapse.net" # Dedicated SQL Pool Endpoint
+
+Write-Host "The selected Dedicated SQL Pool '$sqlPoolName' on server '$sqlPoolServerName' will be used as the target database."
+Write-Host "The name '$newSqlDatabaseName' provided earlier might be used by 'setup.sql' for schema creation or other logical structuring if 'setup.sql' is designed that way."
+
+# setup.sql 실행 (테이블 생성 등)
+if (-not (Test-Path ".\setup.sql")) {
+    Write-Warning ".\setup.sql file not found. Skipping table creation."
+} else {
+    write-host "Running setup.sql in the Dedicated SQL Pool '$sqlPoolName'..."
+    # Invoke-Sqlcmd 실행 시 $sqlPassword 변수 사용
+    Invoke-Sqlcmd -ServerInstance $sqlPoolServerName -Username $sqlUser -Password $sqlPassword -Database $sqlPoolName -InputFile ".\setup.sql" -QueryTimeout 0
+    if ($LASTEXITCODE -ne 0 -and $Error.Count -gt 0) {
+        Write-Error "Failed to run setup.sql in Dedicated SQL Pool '$sqlPoolName'. Check errors above."
+        exit
+    }
+    Write-Host "setup.sql executed successfully in '$sqlPoolName'."
+}
+
+
+# --- 데이터 로드 (선택된 SQL Pool 이름 사용) ---
+write-host "Loading data into '$sqlPoolName'..."
+Get-ChildItem "./data/*.txt" -File | Foreach-Object {
+    write-host ""
+    $file = $_.FullName
+    Write-Host "Processing file: $file"
+    $table = $_.Name.Replace(".txt","")
+    Write-Host "Loading data into table 'dbo.$table' from '$file'..."
+    # bcp 명령어 실행 시 $sqlPassword 변수 사용
+    bcp dbo.$table in $file -S $sqlPoolServerName -U $sqlUser -P $sqlPassword -d $sqlPoolName -f $file.Replace("txt", "fmt") -q -k -E -b 5000
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "BCP command failed for table '$table' and file '$file'. Exit code: $LASTEXITCODE"
+    } else {
+        Write-Host "Data loaded successfully into table '$table'."
+    }
+}
+
+# --- 파일 업로드 (기존 로직 유지, Data Lake 계정 이름 변수 사용) ---
+write-host "Uploading files to Data Lake '$dataLakeAccountName'..."
+$storageAccount = Get-AzStorageAccount -ResourceGroupName $resourceGroupName -Name $dataLakeAccountName
+if (-not $storageAccount) {
+    Write-Error "Storage Account '$dataLakeAccountName' not found in resource group '$resourceGroupName'."
+    exit
+}
+$storageContext = $storageAccount.Context
+$fileContainer = "files"
+
+if (-not (Get-AzStorageContainer -Name $fileContainer -Context $storageContext -ErrorAction SilentlyContinue)) {
+    New-AzStorageContainer -Name $fileContainer -Context $storageContext
+    Write-Host "Created container '$fileContainer' in storage account '$dataLakeAccountName'."
+}
+
+Get-ChildItem "./data/*.csv" -File | Foreach-Object {
+    write-host ""
+    $fileName = $_.Name
+    Write-Host "Uploading $fileName"
+    $blobPath = "data/$fileName"
+    Set-AzStorageBlobContent -File $_.FullName -Container $fileContainer -Blob $blobPath -Context $storageContext -Force
+    if ($LASTEXITCODE -ne 0 -and $Error.Count -gt 0) {
+        Write-Warning "Failed to upload file '$fileName'."
+    } else {
+        Write-Host "File '$fileName' uploaded successfully to '$fileContainer/data/'."
+    }
+}
+
+Write-Host "Script finished at $(Get-Date)"
