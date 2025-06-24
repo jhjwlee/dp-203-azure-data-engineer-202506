@@ -171,14 +171,9 @@ while ([string]::IsNullOrWhiteSpace($sqlUser)) {
 
 $sqlPassword = ""
 while ([string]::IsNullOrWhiteSpace($sqlPassword)) {
-    $sqlPassword = Read-Host "Enter the password for user '$sqlUser'" -AsSecureString
-    $sqlPasswordPlainText = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sqlPassword))
-    if ([string]::IsNullOrWhiteSpace($sqlPasswordPlainText)) {
+    $sqlPassword = Read-Host "Enter the password for user '$sqlUser'"
+    if ([string]::IsNullOrWhiteSpace($sqlPassword)) {
         Write-Output "Password cannot be empty. Please enter a valid password."
-    }
-    else {
-        $sqlPassword = $sqlPasswordPlainText
-        break
     }
 }
 
