@@ -234,7 +234,8 @@ if (-not (Test-Path $setupSqlPath)) {
     write-host "Running setup.sql (from $setupSqlPath) in the Dedicated SQL Pool '$sqlPoolName'..."
     try {
         # -ErrorAction Stop을 추가하여 오류 발생 시 catch 블록으로 넘어가도록 함
-        Invoke-Sqlcmd -ServerInstance $sqlPoolServerName -Username $sqlUser -Password $sqlPassword -Database $sqlPoolName -InputFile $setupSqlPath -QueryTimeout 0 -ErrorAction Stop
+        # Invoke-Sqlcmd -ServerInstance $sqlPoolServerName -Username $sqlUser -Password $sqlPassword -Database $sqlPoolName -InputFile $setupSqlPath -QueryTimeout 0 -ErrorAction Stop
+	sqlcmd -S "$synapseWorkspace.sql.azuresynapse.net" -U $sqlUser -P $sqlPassword -d $sqlDatabaseName -I -i setup.sql
         Write-Host "setup.sql executed successfully in '$sqlPoolName'."
     }
     catch {
