@@ -144,7 +144,7 @@ $sqlUser = Read-Host "Enter the SQL admin username for the Synapse SQL Pool '$sq
 
 Write-Host ""
 Write-Host "Now, enter the password for the SQL Admin user '$sqlUser'."
-$sqlPassword = "" # 이 변수에 사용자가 입력한 검증된 암호가 할당됩니다.
+$sqlPassword = Read-Host "Now, enter the password for the SQL Admin user '$sqlUser'."
 $complexPassword = 1
 while ($complexPassword -ne 1)
 {
