@@ -3,30 +3,48 @@
 Clear-Host
 write-host "Starting script at $(Get-Date)"
 
-# --- 모듈 설치 및 Azure 로그인 ---
+# --- 모듈 설치 함수 ---
 Function Install-Module-If-Missing {
     param(
-        [string]$ModuleName
+        [string]$ModuleName,
+        [string]$MinimumVersion = $null
     )
-    if (Get-Module -ListAvailable -Name $ModuleName) {
-        Write-Host "$ModuleName module is already available."
+    $moduleInstalled = Get-Module -ListAvailable -Name $ModuleName
+    if ($moduleInstalled -and ($MinimumVersion -eq $null -or $moduleInstalled.Version -ge [version]$MinimumVersion) ) {
+        Write-Host "$ModuleName module is already available (Version: $($moduleInstalled.Version))."
     } else {
-        Write-Host "Installing $ModuleName module..."
-        Install-Module -Name $ModuleName -Force -AllowClobber -Scope CurrentUser
+        if ($moduleInstalled) {
+            Write-Host "Found $ModuleName module version $($moduleInstalled.Version), but require at least $MinimumVersion. Updating..."
+        } else {
+            Write-Host "Installing $ModuleName module..."
+        }
+        try {
+            Install-Module -Name $ModuleName -MinimumVersion $MinimumVersion -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
+            Write-Host "$ModuleName module installed/updated successfully."
+        }
+        catch {
+            Write-Error "Failed to install/update $ModuleName module: $($_.Exception.Message)"
+            Write-Warning "Please ensure PowerShellGet is up-to-date (Install-Module PowerShellGet -Force) and try again, or install the module manually."
+            exit
+        }
     }
 }
 
+# --- 필수 모듈 설치 ---
 Install-Module-If-Missing -ModuleName Az.Accounts
 Install-Module-If-Missing -ModuleName Az.Resources
 Install-Module-If-Missing -ModuleName Az.Synapse
 Install-Module-If-Missing -ModuleName SqlServer
-# BCP를 사용하기 위해 SqlServer 모듈이 필요할 수 있으나, bcp는 보통 PATH에 있거나 별도 설치됩니다.
-# SqlServer 모듈은 Invoke-Sqlcmd 등을 위해 설치하는 것이 좋습니다. 여기서는 bcp 직접 호출.
 
-# Azure 계정 연결 확인 및 로그인
+# --- Azure 계정 연결 확인 및 로그인 ---
 if (-not (Get-AzContext)) {
     Write-Host "Connecting to Azure..."
-    Connect-AzAccount
+    try {
+        Connect-AzAccount -ErrorAction Stop
+    } catch {
+        Write-Error "Failed to connect to Azure: $($_.Exception.Message)"
+        exit
+    }
 } else {
     Write-Host "Already connected to Azure account: $((Get-AzContext).Account.Id)"
 }
@@ -36,7 +54,10 @@ $subs = Get-AzSubscription | Select-Object Name, Id
 if ($subs.Count -eq 0) {
     Write-Error "No Azure subscriptions found. Please check your Azure login."
     exit
-} elseif ($subs.Count -gt 1) {
+}
+
+$selectedSubId = $null
+if ($subs.Count -gt 1) {
     Write-Host "You have multiple Azure subscriptions - please select the one you want to use:"
     for ($i = 0; $i -lt $subs.length; $i++) {
         Write-Host "[$($i)]: $($subs[$i].Name) (ID = $($subs[$i].Id))"
@@ -52,27 +73,26 @@ if ($subs.Count -eq 0) {
         }
         catch {
             Write-Warning "Invalid input. Please enter a number."
-            $selectedIndex = -1
+            $selectedIndex = -1 # 루프를 계속하기 위해 초기화
         }
     }
     $selectedSubId = $subs[$selectedIndex].Id
-    Set-AzContext -SubscriptionId $selectedSubId
-    Write-Host "Using subscription: $($subs[$selectedIndex].Name)"
+    Write-Host "Selected subscription: $($subs[$selectedIndex].Name)"
 } else {
     $selectedSubId = $subs[0].Id
-    Set-AzContext -SubscriptionId $selectedSubId
     Write-Host "Using single available subscription: $($subs[0].Name)"
 }
+Set-AzContext -SubscriptionId $selectedSubId -ErrorAction Stop
 
 # --- 리소스 그룹명 입력 및 확인 ---
 $resourceGroupName = ""
-while (-not $resourceGroupName) {
+while ([string]::IsNullOrWhiteSpace($resourceGroupName)) {
     $resourceGroupName = Read-Host "Enter the name of the Azure Resource Group"
-    if (-not $resourceGroupName) {
+    if ([string]::IsNullOrWhiteSpace($resourceGroupName)) {
         Write-Warning "Resource Group name cannot be empty."
     } elseif (-not (Get-AzResourceGroup -Name $resourceGroupName -ErrorAction SilentlyContinue)) {
         Write-Warning "Resource Group '$resourceGroupName' not found. Please enter a valid name."
-        $resourceGroupName = ""
+        $resourceGroupName = "" # 다시 입력 받도록 초기화
     } else {
         Write-Host "Using Resource Group: $resourceGroupName"
     }
@@ -80,8 +100,8 @@ while (-not $resourceGroupName) {
 
 # --- Synapse 작업 영역 탐색 및 선택 ---
 Write-Host "Looking for Synapse Workspaces in '$resourceGroupName'..."
-$synapseWorkspaces = Get-AzSynapseWorkspace -ResourceGroupName $resourceGroupName
-if ($synapseWorkspaces.Count -eq 0) {
+$synapseWorkspaces = Get-AzSynapseWorkspace -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
+if (-not $synapseWorkspaces -or $synapseWorkspaces.Count -eq 0) {
     Write-Error "No Synapse Workspaces found in Resource Group '$resourceGroupName'."
     exit
 }
@@ -107,17 +127,24 @@ if ($synapseWorkspaces.Count -gt 1) {
         }
     }
     $selectedWorkspace = $synapseWorkspaces[$selectedIndex]
+    Write-Host "Selected Synapse Workspace: $($selectedWorkspace.Name)"
 } else {
     $selectedWorkspace = $synapseWorkspaces[0]
     Write-Host "Automatically selected Synapse Workspace: $($selectedWorkspace.Name)"
 }
 $synapseWorkspaceName = $selectedWorkspace.Name
 $synapseSqlEndpoint = $selectedWorkspace.ConnectivityEndpoints.Sql
+Write-Host "Synapse SQL Endpoint set to: '$synapseSqlEndpoint'" # 엔드포인트 값 확인
+
+if ([string]::IsNullOrWhiteSpace($synapseSqlEndpoint)) {
+    Write-Error "Failed to retrieve Synapse SQL Endpoint for workspace '$synapseWorkspaceName'. Cannot proceed."
+    exit
+}
 
 # --- 전용 SQL 풀 탐색 및 선택 ---
 Write-Host "Looking for dedicated SQL Pools in Synapse Workspace '$synapseWorkspaceName'..."
-$sqlPools = Get-AzSynapseSqlPool -ResourceGroupName $resourceGroupName -WorkspaceName $synapseWorkspaceName
-if ($sqlPools.Count -eq 0) {
+$sqlPools = Get-AzSynapseSqlPool -ResourceGroupName $resourceGroupName -WorkspaceName $synapseWorkspaceName -ErrorAction SilentlyContinue
+if (-not $sqlPools -or $sqlPools.Count -eq 0) {
     Write-Error "No dedicated SQL Pools found in Synapse Workspace '$synapseWorkspaceName'."
     exit
 }
@@ -143,27 +170,40 @@ if ($sqlPools.Count -gt 1) {
         }
     }
     $selectedSqlPool = $sqlPools[$selectedIndex]
+    Write-Host "Selected SQL Pool: $($selectedSqlPool.Name)"
 } else {
     $selectedSqlPool = $sqlPools[0]
     Write-Host "Automatically selected SQL Pool: $($selectedSqlPool.Name)"
 }
-$sqlPoolName = $selectedSqlPool.Name # 이 이름이 bcp의 -d 옵션으로 사용될 데이터베이스 이름
+$sqlPoolName = $selectedSqlPool.Name
 
-# SQL 풀 상태 확인 및 재개 (필요시)
+# --- SQL 풀 상태 확인 및 재개 (필요시) ---
 if ($selectedSqlPool.Status -ne "Online") {
     Write-Warning "SQL Pool '$sqlPoolName' is not Online (Current status: $($selectedSqlPool.Status))."
-    $resumePool = Read-Host "Do you want to attempt to resume it? (y/n)"
-    if ($resumePool -eq 'y') {
+    $resumePoolConfirmation = Read-Host "Do you want to attempt to resume it? (y/n)"
+    if ($resumePoolConfirmation -eq 'y') {
         Write-Host "Resuming SQL Pool '$sqlPoolName'..."
-        Resume-AzSynapseSqlPool -WorkspaceName $synapseWorkspaceName -Name $sqlPoolName
-        Write-Host "Waiting for SQL Pool to be online..."
-        $poolStatus = (Get-AzSynapseSqlPool -WorkspaceName $synapseWorkspaceName -Name $sqlPoolName).Status
-        while($poolStatus -ne "Online"){
-            Start-Sleep -Seconds 30
+        try {
+            Resume-AzSynapseSqlPool -WorkspaceName $synapseWorkspaceName -Name $sqlPoolName -ErrorAction Stop
+            Write-Host "Waiting for SQL Pool '$sqlPoolName' to be online..."
+            $timeoutSeconds = 600 # 10분 대기
+            $startTime = Get-Date
             $poolStatus = (Get-AzSynapseSqlPool -WorkspaceName $synapseWorkspaceName -Name $sqlPoolName).Status
-            Write-Host "Current pool status: $poolStatus"
+            while ($poolStatus -ne "Online" -and (Get-Date -UFormat %s) -lt ($startTime.AddSeconds($timeoutSeconds) | Get-Date -UFormat %s) ) {
+                Write-Host "Current pool status: $poolStatus. Waiting..."
+                Start-Sleep -Seconds 30
+                $poolStatus = (Get-AzSynapseSqlPool -WorkspaceName $synapseWorkspaceName -Name $sqlPoolName).Status
+            }
+            if ($poolStatus -eq "Online") {
+                Write-Host "SQL Pool '$sqlPoolName' is now Online."
+            } else {
+                Write-Error "SQL Pool '$sqlPoolName' did not come Online within the timeout period. Current status: $poolStatus. Exiting."
+                exit
+            }
+        } catch {
+            Write-Error "Failed to resume SQL Pool '$sqlPoolName': $($_.Exception.Message)"
+            exit
         }
-        Write-Host "SQL Pool '$sqlPoolName' is now Online."
     } else {
         Write-Error "SQL Pool must be Online to proceed. Exiting."
         exit
@@ -171,124 +211,175 @@ if ($selectedSqlPool.Status -ne "Online") {
 }
 
 # --- Synapse SQL 사용자명 및 암호 입력 ---
-$sqlUser = Read-Host "Enter the SQL admin username for '$synapseWorkspaceName'"
+$sqlUser = ""
+while ([string]::IsNullOrWhiteSpace($sqlUser)) {
+    $sqlUser = Read-Host "Enter the SQL admin username for '$synapseWorkspaceName'"
+    if ([string]::IsNullOrWhiteSpace($sqlUser)) {
+        Write-Warning "SQL username cannot be empty."
+    }
+}
+
 $sqlPassword = ""
 $complexPassword = 0
-
 while ($complexPassword -ne 1) {
-    $SqlPassword = Read-Host -AsSecureString "Enter the password for SQL user '$sqlUser'.
+    $securePassword = Read-Host -AsSecureString "Enter the password for SQL user '$sqlUser'.
     `The password must meet complexity requirements:
     ` - Minimum 8 characters. 
     ` - At least one upper case English letter [A-Z]
     ` - At least one lower case English letter [a-z]
     ` - At least one digit [0-9]
-    ` - At least one special character (!,@,#,%,^,&,$)
-    ` " | ConvertFrom-SecureString -AsPlainText
+    ` - At least one special character (!,@,#,%,^,&,$)"
+    
+    $sqlPassword = ConvertFrom-SecureString -SecureString $securePassword -AsPlainText
 
-    if (($SqlPassword -cmatch '[a-z]') -and `
-        ($SqlPassword -cmatch '[A-Z]') -and `
-        ($SqlPassword -match '\d') -and `
-        ($SqlPassword.length -ge 8) -and `
-        ($SqlPassword -match '[!@#%^&$]')) { # 주의: $는 정규식에서 문자열 끝을 의미할 수 있어 이스케이프 필요시 \$. 여기서는 OR 조건이라 괜찮을 수 있음.
-                                            # 좀 더 안전하게 하려면 $SqlPassword -match '[\!\@\#\%\^\&\$]'
+    if (($sqlPassword -cmatch '[a-z]') -and `
+        ($sqlPassword -cmatch '[A-Z]') -and `
+        ($sqlPassword -match '\d') -and `
+        ($sqlPassword.length -ge 8) -and `
+        ($sqlPassword -match '[\!\@\#\%\^\&\$]')) { # 정규식 특수문자 이스케이프 개선
         $complexPassword = 1
 	    Write-Output "Password accepted. Make sure you remember this!"
     } else {
-        Write-Warning "$SqlPassword does not meet the complexity requirements. Please try again."
+        Write-Warning "Password does not meet the complexity requirements. Please try again."
     }
 }
 
 # --- 리소스 공급자 등록 (안전을 위해 유지) ---
-Write-Host "Registering resource providers (if not already registered)...";
-$provider_list = "Microsoft.Synapse", "Microsoft.Sql", "Microsoft.Storage" # Microsoft.Compute는 여기서는 직접 사용 안함
+Write-Host "Checking/Registering resource providers..."
+$provider_list = "Microsoft.Synapse", "Microsoft.Sql", "Microsoft.Storage"
 foreach ($provider in $provider_list){
-    $registrationState = (Get-AzResourceProvider -ProviderNamespace $provider).RegistrationState
+    $registrationState = (Get-AzResourceProvider -ProviderNamespace $provider -ErrorAction SilentlyContinue).RegistrationState
     if($registrationState -ne "Registered"){
         Write-Host "Registering $provider..."
-        Register-AzResourceProvider -ProviderNamespace $provider
-        # 등록 완료까지 시간이 걸릴 수 있으므로, 실제 운영 스크립트에서는 완료 대기 로직이 필요할 수 있습니다.
-        Write-Host "$provider registration initiated. Status: $((Get-AzResourceProvider -ProviderNamespace $provider).RegistrationState)"
+        try {
+            Register-AzResourceProvider -ProviderNamespace $provider -ErrorAction Stop
+            # 실제 등록 완료까지 시간이 걸릴 수 있으므로, 상태를 주기적으로 확인하는 로직이 필요할 수 있으나 여기서는 생략.
+            Write-Host "$provider registration initiated. Current status: $((Get-AzResourceProvider -ProviderNamespace $provider).RegistrationState)"
+        } catch {
+            Write-Warning "Failed to register provider $provider: $($_.Exception.Message)"
+        }
     } else {
         Write-Host "$provider is already registered."
     }
 }
 
 # --- 데이터베이스 스키마 생성 (setup.sql 실행) ---
-# setup.sql 파일이 스크립트와 동일한 디렉토리에 있다고 가정
-$setupSqlPath = Join-Path $PSScriptRoot "setup.sql" # 스크립트가 있는 디렉토리 기준
-if (-not (Test-Path $setupSqlPath)) {
-    Write-Error "Setup script 'setup.sql' not found at '$setupSqlPath'. Please create it. This script typically contains CREATE TABLE statements."
-    # 예시: Write-Host "Example content for setup.sql: CREATE TABLE dbo.MyTable (ID INT, Name VARCHAR(100));"
+$setupSqlPath = Join-Path $PSScriptRoot "setup.sql"
+if (-not (Test-Path $setupSqlPath -PathType Leaf)) { # -PathType Leaf 로 파일인지 명확히 확인
+    Write-Error "Setup script 'setup.sql' not found or is not a file at '$setupSqlPath'. Please create it. This script typically contains CREATE TABLE statements."
     exit
 }
 
-# bcp와 sqlcmd 경로 확인 (필요시)
-$bcpPath = Get-Command bcp -ErrorAction SilentlyContinue
-$sqlcmdPath = Get-Command sqlcmd -ErrorAction SilentlyContinue
-
-if (-not $bcpPath) {
+# bcp 경로 확인
+$bcpPathInfo = Get-Command bcp -ErrorAction SilentlyContinue
+if (-not $bcpPathInfo) {
     Write-Error "bcp.exe not found in PATH. Please install SQL Server Command Line Utilities."
     exit
 }
-if (-not $sqlcmdPath) {
-    Write-Error "sqlcmd.exe not found in PATH. Please install SQL Server Command Line Utilities."
-    exit
-}
+$bcpExecutablePath = $bcpPathInfo.Source # bcp 실행 파일 경로
 
 write-host "Creating/configuring database objects in '$sqlPoolName' using '$setupSqlPath'..."
 try {
-    # -d 옵션에는 전용 SQL 풀의 이름을 사용합니다. 이것이 작업 대상 데이터베이스입니다.
-    # -I 옵션은 SET QUOTED_IDENTIFIER ON을 설정합니다.
-    sqlcmd -S "$($synapseSqlEndpoint)" -U $sqlUser -P $sqlPassword -d $sqlPoolName -I -i "$setupSqlPath" -b # -b: 오류 시 종료
-    Write-Host "Database schema setup complete."
+    Write-Host "Attempting to execute setup.sql via Invoke-Sqlcmd..."
+    Write-Host "Server: $synapseSqlEndpoint, Database: $sqlPoolName, User: $sqlUser"
+    Invoke-Sqlcmd -ServerInstance $synapseSqlEndpoint -Username $sqlUser -Password $sqlPassword -Database $sqlPoolName -InputFile $setupSqlPath -QueryTimeout 0 -ConnectionTimeout 60 -ErrorAction Stop
+    Write-Host "Database schema setup complete using Invoke-Sqlcmd."
 } catch {
-    Write-Error "Error executing setup.sql: $($_.Exception.Message)"
+    Write-Error "Error executing setup.sql with Invoke-Sqlcmd: $($_.Exception.ToString())"
+    if ($_.Exception.InnerException) {
+        Write-Warning "Inner Exception: $($_.Exception.InnerException.ToString())"
+    }
+    Write-Warning "Check Synapse SQL endpoint '$($synapseSqlEndpoint)', credentials, firewall rules on Synapse Workspace, and SQL Pool status ('$($selectedSqlPool.Status)')."
     exit
 }
 
-
-# --- 데이터 로딩 ---
-# 데이터 파일들이 ./data/ 디렉토리에 있고, 각 .txt 파일에 해당하는 .fmt 파일이 있다고 가정
-$dataFolderPath = Join-Path $PSScriptRoot "data" # 스크립트가 있는 디렉토리 기준 ./data/
+# --- 데이터 로딩 (bcp 사용) ---
+$dataFolderPath = Join-Path $PSScriptRoot "data"
 if (-not (Test-Path $dataFolderPath -PathType Container)) {
     Write-Warning "Data folder '$dataFolderPath' not found. Skipping data loading."
 } else {
-    write-host "Loading data into '$sqlPoolName'..."
+    write-host "Loading data into '$sqlPoolName' from '$dataFolderPath'..."
     Get-ChildItem -Path $dataFolderPath -Filter "*.txt" -File | ForEach-Object {
         $textFile = $_.FullName
-        $tableName = $_.BaseName # 확장자 제외한 파일 이름 (예: "customers")
+        $tableName = $_.BaseName # 확장자 제외한 파일 이름
         $formatFile = Join-Path $_.DirectoryName ($tableName + ".fmt")
 
         Write-Host ""
-        Write-Host "Processing data file: $textFile for table: dbo.$tableName"
+        Write-Host "Processing data file: '$textFile' for table: 'dbo.$tableName'"
 
-        if (-not (Test-Path $formatFile)) {
-            Write-Warning "Format file '$formatFile' not found for '$textFile'. Skipping this file."
+        if (-not (Test-Path $formatFile -PathType Leaf)) {
+            Write-Warning "Format file '$formatFile' not found or is not a file for '$textFile'. Skipping this file."
             return # Foreach-Object의 현재 반복을 건너뜀 (continue와 유사)
         }
 
-        Write-Host "Loading data using bcp into dbo.$tableName..."
+        Write-Host "Loading data using bcp into 'dbo.$tableName'..."
+        
+        # --- BCP 실행을 위한 디버깅 정보 출력 ---
+        Write-Host "BCP Debug Info:"
+        Write-Host "  BCP Executable: $bcpExecutablePath"
+        Write-Host "  Table Name: dbo.$tableName"
+        Write-Host "  Input File: $textFile"
+        Write-Host "  Synapse SQL Endpoint: $synapseSqlEndpoint"
+        Write-Host "  SQL User: $sqlUser"
+        # 암호는 보안상 직접 출력하지 않습니다.
+        Write-Host "  SQL Pool (Database): $sqlPoolName"
+        Write-Host "  Format File: $formatFile"
+        # --- 디버깅 정보 출력 끝 ---
+
+        # bcp 실행 인자 구성 (각 인자를 별도의 문자열로 배열에 추가)
+        $bcpArgumentList = @(
+            "dbo.$tableName", 
+            "in", 
+            $textFile,  # 따옴표는 Start-Process가 자동으로 처리하거나, 필요시 ArgumentList 문자열 자체에 포함
+            "-S", $synapseSqlEndpoint,
+            "-U", $sqlUser,
+            "-P", $sqlPassword, # Start-Process는 암호를 안전하게 처리하지 않으므로 주의. 실제 운영시 다른 방법 고려.
+            "-d", $sqlPoolName,
+            "-f", $formatFile,
+            "-q",             # Quoted Identifier
+            "-k",             # Keep Nulls
+            "-E",             # Keep Identity
+            "-b", "5000",     # Batch Size
+            "-e", "$($textFile).err" # Error File
+        )
+        
+        $fullBcpCommandForDisplay = "$bcpExecutablePath " + ($bcpArgumentList -join ' ') # 표시용 (암호 제외하고 표시하는 것이 좋음)
+        Write-Host "Constructed BCP command (for display, password omitted): $($fullBcpCommandForDisplay.Replace("-P `"$sqlPassword`"", "-P ********"))"
+
+
         try {
-            # bcp dbo.$table in $file -S "server.sql.azuresynapse.net" -U user -P pass -d database_name -f format_file.fmt -q -k -E -b 5000
-            $bcpArgs = "dbo.$tableName", "in", "`"$textFile`"", "-S", "`"$($synapseSqlEndpoint)`"", "-U", $sqlUser, "-P", $sqlPassword, "-d", $sqlPoolName, "-f", "`"$formatFile`"", "-q", "-k", "-E", "-b", "5000", "-e", "`"$($textFile).err`""
-            # & bcp $bcpArgs # 이 방식은 공백이 있는 경로/파일명에 문제 발생 가능
-            Start-Process -FilePath "bcp" -ArgumentList $bcpArgs -Wait -NoNewWindow
-            # & $bcpPath.Source $bcpArgs # 이렇게 하면 공백 문제 해결될 수도 있음
-            # Invoke-Expression "bcp $($bcpArgs -join ' ')" # 또 다른 방법
+            # Start-Process를 사용하여 bcp 실행. ArgumentList는 각 인수를 개별 요소로 전달.
+            $process = Start-Process -FilePath $bcpExecutablePath -ArgumentList $bcpArgumentList -Wait -PassThru -NoNewWindow -ErrorAction Stop
             
-            Write-Host "Data loading for $tableName completed."
+            if ($process.ExitCode -ne 0) {
+                $errorMessage = "BCP failed for table '$tableName' with file '$textFile'. Exit code: $($process.ExitCode)."
+                if (Test-Path "$($textFile).err") {
+                    $errorFileContent = Get-Content "$($textFile).err" -Raw -ErrorAction SilentlyContinue
+                    if ($errorFileContent) {
+                        $errorMessage += "`nBCP error file ('$($textFile).err') content:`n$errorFileContent"
+                    }
+                }
+                throw $errorMessage # 예외를 발생시켜 catch 블록으로 전달
+            }
+            
+            Write-Host "Data loading for '$tableName' completed successfully."
+            # 성공 시 오류 파일이 비어있으면 삭제
             if (Test-Path "$($textFile).err") {
-                $errorContent = Get-Content "$($textFile).err"
-                if ($errorContent) {
-                    Write-Warning "BCP encountered errors for $tableName. Check $($textFile).err for details:"
-                    Get-Content "$($textFile).err" | Write-Warning
+                $errFileInfo = Get-Item "$($textFile).err"
+                if ($errFileInfo.Length -eq 0) {
+                    Remove-Item "$($textFile).err" -Force
+                    Write-Host "Empty BCP error file '$($textFile).err' removed."
                 } else {
-                    Remove-Item "$($textFile).err" # 오류 없으면 에러 파일 삭제
+                     Write-Warning "BCP reported issues for '$tableName'. Check error file '$($textFile).err' for details."
                 }
             }
         } catch {
             Write-Error "Error during bcp for table '$tableName' with file '$textFile': $($_.Exception.Message)"
-            Write-Warning "Check $($textFile).err for bcp error details if it was created."
+            # 이미 throw된 예외 메시지에 bcp 오류 파일 내용이 포함되었을 수 있음
+            if (Test-Path "$($textFile).err" -and $_.Exception.Message -notmatch "BCP error file") { # 중복 출력을 피하기 위해
+                Write-Warning "Content of BCP error file '$($textFile).err':"
+                Get-Content "$($textFile).err" -Raw -ErrorAction SilentlyContinue | Write-Warning
+            }
         }
     }
 }
