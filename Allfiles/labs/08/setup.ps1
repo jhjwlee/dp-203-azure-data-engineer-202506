@@ -19,7 +19,7 @@ Function Install-Module-If-Missing {
 Install-Module-If-Missing -ModuleName Az.Accounts
 Install-Module-If-Missing -ModuleName Az.Resources
 Install-Module-If-Missing -ModuleName Az.Synapse
-Install-Module-If-Missing -ModuleName Az.SqlServer
+Install-Module-If-Missing -ModuleName SqlServer
 # BCP를 사용하기 위해 SqlServer 모듈이 필요할 수 있으나, bcp는 보통 PATH에 있거나 별도 설치됩니다.
 # SqlServer 모듈은 Invoke-Sqlcmd 등을 위해 설치하는 것이 좋습니다. 여기서는 bcp 직접 호출.
 
