@@ -1,277 +1,265 @@
 Clear-Host
-write-host "Starting script at $(Get-Date)"
+Write-Host "Starting script at $(Get-Date)"
 
+# Ensure Az.Synapse module is available
+Write-Host "Checking for Az.Synapse module and installing if necessary..."
 Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-Install-Module -Name Az.Synapse -Force
+Install-Module -Name Az.Synapse -Force -Scope CurrentUser
 
-# Handle cases where the user has multiple subscriptions
-$subs = Get-AzSubscription | Select-Object
-if($subs.GetType().IsArray -and $subs.length -gt 1){
-        Write-Host "You have multiple Azure subscriptions - please select the one you want to use:"
-        for($i = 0; $i -lt $subs.length; $i++)
-        {
-                Write-Host "[$($i)]: $($subs[$i].Name) (ID = $($subs[$i].Id))"
-        }
-        $selectedIndex = -1
-        $selectedValidIndex = 0
-        while ($selectedValidIndex -ne 1)
-        {
-                $enteredValue = Read-Host("Enter 0 to $($subs.Length - 1)")
-                if (-not ([string]::IsNullOrEmpty($enteredValue)))
-                {
-                    if ([int]$enteredValue -in (0..$($subs.Length - 1)))
-                    {
-                        $selectedIndex = [int]$enteredValue
-                        $selectedValidIndex = 1
-                    }
-                    else
-                    {
-                        Write-Output "Please enter a valid subscription number."
-                    }
-                }
-                else
-                {
-                    Write-Output "Please enter a valid subscription number."
-                }
-        }
-        $selectedSub = $subs[$selectedIndex].Id
-        Select-AzSubscription -SubscriptionId $selectedSub
-        az account set --subscription $selectedSub
+# Connect to Azure and select subscription
+Try {
+    Connect-AzAccount -ErrorAction Stop
+} Catch {
+    Write-Error "Failed to connect to Azure. Please ensure you are logged in via Connect-AzAccount."
+    Exit
 }
 
-# Prompt user for resource group name
-write-host ""
+$subs = Get-AzSubscription | Select-Object Name, Id
+if ($null -eq $subs) {
+    Write-Error "No Azure subscriptions found. Please check your Azure account."
+    Exit
+}
+
+if ($subs.GetType().IsArray -and $subs.length -gt 1) {
+    Write-Host "You have multiple Azure subscriptions - please select the one you want to use:"
+    for ($i = 0; $i -lt $subs.length; $i++) {
+        Write-Host "[$($i)]: $($subs[$i].Name) (ID = $($subs[$i].Id))"
+    }
+    $selectedIndex = -1
+    $selectedValidIndex = 0
+    while ($selectedValidIndex -ne 1) {
+        $enteredValue = Read-Host ("Enter 0 to $($subs.Length - 1)")
+        if (-not ([string]::IsNullOrEmpty($enteredValue))) {
+            if ($enteredValue -match "^\d+$" -and [int]$enteredValue -ge 0 -and [int]$enteredValue -lt $subs.Length) {
+                $selectedIndex = [int]$enteredValue
+                $selectedValidIndex = 1
+            } else {
+                Write-Warning "Please enter a valid subscription number."
+            }
+        } else {
+            Write-Warning "Please enter a valid subscription number."
+        }
+    }
+    $selectedSub = $subs[$selectedIndex].Id
+    Select-AzSubscription -SubscriptionId $selectedSub
+    # az account set --subscription $selectedSub # For Azure CLI commands if used elsewhere
+} elseif ($subs) {
+    # Only one subscription
+    $selectedSub = $subs.Id
+    Select-AzSubscription -SubscriptionId $selectedSub
+    # az account set --subscription $selectedSub
+    Write-Host "Using subscription: $($subs.Name) (ID = $selectedSub)"
+}
+Write-Host "Using Azure Context: $((Get-AzContext).Name)"
+
+
+# 1. Prompt user for Resource Group name
 $resourceGroupName = ""
-while ([string]::IsNullOrWhiteSpace($resourceGroupName))
-{
-    $resourceGroupName = Read-Host "Enter the resource group name"
-    if ([string]::IsNullOrWhiteSpace($resourceGroupName))
-    {
-        Write-Output "Resource group name cannot be empty. Please enter a valid name."
+while ([string]::IsNullOrWhiteSpace($resourceGroupName)) {
+    $resourceGroupNameInput = Read-Host "Enter the name of your existing Azure Resource Group"
+    if (-not [string]::IsNullOrWhiteSpace($resourceGroupNameInput)) {
+        if (Get-AzResourceGroup -Name $resourceGroupNameInput -ErrorAction SilentlyContinue) {
+            $resourceGroupName = $resourceGroupNameInput
+            Write-Host "Using Resource Group: $resourceGroupName"
+        } else {
+            Write-Warning "Resource Group '$resourceGroupNameInput' not found. Please check the name and try again."
+        }
+    } else {
+        Write-Warning "Resource Group name cannot be empty."
     }
 }
 
-# Check if resource group exists
-$resourceGroup = Get-AzResourceGroup -Name $resourceGroupName -ErrorAction SilentlyContinue
-if (-not $resourceGroup) {
-    Write-Host "Resource group '$resourceGroupName' not found. Please check the name and try again."
-    Exit
-}
-Write-Host "Found resource group: $resourceGroupName"
-
-# Find Synapse workspaces in the resource group
-Write-Host "Searching for Synapse workspaces in resource group '$resourceGroupName'..."
+# 2. Find Synapse Workspace in the specified Resource Group
+Write-Host "Searching for Synapse Workspaces in Resource Group '$resourceGroupName'..."
 $synapseWorkspaces = Get-AzSynapseWorkspace -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
 
 if (-not $synapseWorkspaces -or $synapseWorkspaces.Count -eq 0) {
-    Write-Host "No Synapse workspaces found in resource group '$resourceGroupName'."
+    Write-Error "No Synapse Workspace found in Resource Group '$resourceGroupName'."
     Exit
 }
 
-# Select Synapse workspace if multiple exist
-$selectedWorkspace = $null
-if ($synapseWorkspaces.GetType().IsArray -and $synapseWorkspaces.Count -gt 1) {
-    Write-Host "Multiple Synapse workspaces found. Please select one:"
-    for($i = 0; $i -lt $synapseWorkspaces.Count; $i++) {
-        Write-Host "[$($i)]: $($synapseWorkspaces[$i].Name)"
+$synapseWorkspaceName = $null
+if ($synapseWorkspaces.Count -eq 1) {
+    $synapseWorkspaceName = $synapseWorkspaces[0].Name
+    Write-Host "Found Synapse Workspace: $synapseWorkspaceName"
+} else {
+    Write-Host "Multiple Synapse Workspaces found. Please select one:"
+    for ($i = 0; $i -lt $synapseWorkspaces.Count; $i++) {
+        Write-Host "[$i] $($synapseWorkspaces[$i].Name)"
     }
-    
-    $selectedIndex = -1
-    $selectedValidIndex = 0
-    while ($selectedValidIndex -ne 1) {
-        $enteredValue = Read-Host("Enter 0 to $($synapseWorkspaces.Count - 1)")
-        if (-not ([string]::IsNullOrEmpty($enteredValue))) {
-            if ([int]$enteredValue -in (0..$($synapseWorkspaces.Count - 1))) {
-                $selectedIndex = [int]$enteredValue
-                $selectedValidIndex = 1
-            }
-            else {
-                Write-Output "Please enter a valid workspace number."
-            }
-        }
-        else {
-            Write-Output "Please enter a valid workspace number."
-        }
+    $wsIndexInput = Read-Host "Enter the number of the Synapse Workspace to use"
+    if ($wsIndexInput -match "^\d+$" -and [int]$wsIndexInput -ge 0 -and [int]$wsIndexInput -lt $synapseWorkspaces.Count) {
+        $synapseWorkspaceName = $synapseWorkspaces[[int]$wsIndexInput].Name
+        Write-Host "Using Synapse Workspace: $synapseWorkspaceName"
+    } else {
+        Write-Error "Invalid selection for Synapse Workspace."
+        Exit
     }
-    $selectedWorkspace = $synapseWorkspaces[$selectedIndex]
 }
-else {
-    $selectedWorkspace = $synapseWorkspaces[0]
-}
+$synapseWorkspaceDetails = Get-AzSynapseWorkspace -ResourceGroupName $resourceGroupName -Name $synapseWorkspaceName
+$dedicatedServerName = "$($synapseWorkspaceName).sql.azuresynapse.net" # Endpoint for Dedicated SQL Pool
 
-$synapseWorkspaceName = $selectedWorkspace.Name
-Write-Host "Selected Synapse workspace: $synapseWorkspaceName"
-
-# Find dedicated SQL pools in the workspace
-Write-Host "Searching for dedicated SQL pools in workspace '$synapseWorkspaceName'..."
-$sqlPools = Get-AzSynapseSqlPool -WorkspaceName $synapseWorkspaceName -ErrorAction SilentlyContinue
+# 3. Find Dedicated SQL Pool in the selected Synapse Workspace
+Write-Host "Searching for Dedicated SQL Pools in Synapse Workspace '$synapseWorkspaceName'..."
+$sqlPools = Get-AzSynapseSqlPool -ResourceGroupName $resourceGroupName -WorkspaceName $synapseWorkspaceName -ErrorAction SilentlyContinue
 
 if (-not $sqlPools -or $sqlPools.Count -eq 0) {
-    Write-Host "No dedicated SQL pools found in workspace '$synapseWorkspaceName'."
+    Write-Error "No Dedicated SQL Pool found in Synapse Workspace '$synapseWorkspaceName'."
     Exit
 }
 
-# Select SQL pool if multiple exist
+$sqlPoolName = $null
 $selectedSqlPool = $null
-if ($sqlPools.GetType().IsArray -and $sqlPools.Count -gt 1) {
-    Write-Host "Multiple dedicated SQL pools found. Please select one:"
-    for($i = 0; $i -lt $sqlPools.Count; $i++) {
-        Write-Host "[$($i)]: $($sqlPools[$i].Name) (Status: $($sqlPools[$i].Status))"
-    }
-    
-    $selectedIndex = -1
-    $selectedValidIndex = 0
-    while ($selectedValidIndex -ne 1) {
-        $enteredValue = Read-Host("Enter 0 to $($sqlPools.Count - 1)")
-        if (-not ([string]::IsNullOrEmpty($enteredValue))) {
-            if ([int]$enteredValue -in (0..$($sqlPools.Count - 1))) {
-                $selectedIndex = [int]$enteredValue
-                $selectedValidIndex = 1
-            }
-            else {
-                Write-Output "Please enter a valid SQL pool number."
-            }
-        }
-        else {
-            Write-Output "Please enter a valid SQL pool number."
-        }
-    }
-    $selectedSqlPool = $sqlPools[$selectedIndex]
-}
-else {
+if ($sqlPools.Count -eq 1) {
     $selectedSqlPool = $sqlPools[0]
+    $sqlPoolName = $selectedSqlPool.Name
+    Write-Host "Found Dedicated SQL Pool: $sqlPoolName (Status: $($selectedSqlPool.Status))"
+} else {
+    Write-Host "Multiple Dedicated SQL Pools found. Please select one:"
+    for ($i = 0; $i -lt $sqlPools.Count; $i++) {
+        Write-Host "[$i] $($sqlPools[$i].Name) (Status: $($sqlPools[$i].Status))"
+    }
+    $poolIndexInput = Read-Host "Enter the number of the Dedicated SQL Pool to use"
+    if ($poolIndexInput -match "^\d+$" -and [int]$poolIndexInput -ge 0 -and [int]$poolIndexInput -lt $sqlPools.Count) {
+        $selectedSqlPool = $sqlPools[[int]$poolIndexInput]
+        $sqlPoolName = $selectedSqlPool.Name
+        Write-Host "Using Dedicated SQL Pool: $sqlPoolName (Status: $($selectedSqlPool.Status))"
+    } else {
+        Write-Error "Invalid selection for Dedicated SQL Pool."
+        Exit
+    }
 }
-
-$sqlPoolName = $selectedSqlPool.Name
-$sqlPoolStatus = $selectedSqlPool.Status
-Write-Host "Selected dedicated SQL pool: $sqlPoolName (Status: $sqlPoolStatus)"
 
 # Resume SQL pool if it's paused
-if ($sqlPoolStatus -eq "Paused") {
-    Write-Host "SQL pool is paused. Resuming..."
-    Resume-AzSynapseSqlPool -WorkspaceName $synapseWorkspaceName -Name $sqlPoolName
+if ($selectedSqlPool.Status -eq "Paused") {
+    Write-Host "SQL pool '$sqlPoolName' is paused. Resuming..."
+    Resume-AzSynapseSqlPool -WorkspaceName $synapseWorkspaceName -Name $sqlPoolName -ResourceGroupName $resourceGroupName
     Write-Host "Waiting for SQL pool to resume..."
+    $currentStatusCheck = $null
     do {
-        Start-Sleep -Seconds 30
-        $poolStatus = Get-AzSynapseSqlPool -WorkspaceName $synapseWorkspaceName -Name $sqlPoolName
-        Write-Host "Current status: $($poolStatus.Status)"
-    } while ($poolStatus.Status -ne "Online")
-    Write-Host "SQL pool is now online."
+        Start-Sleep -Seconds 15 # Check more frequently
+        $currentStatusCheck = (Get-AzSynapseSqlPool -WorkspaceName $synapseWorkspaceName -Name $sqlPoolName -ResourceGroupName $resourceGroupName).Status
+        Write-Host "Current status of '$sqlPoolName': $currentStatusCheck"
+    } while ($currentStatusCheck -ne "Online")
+    Write-Host "SQL pool '$sqlPoolName' is now online."
 }
 
-# Prompt for SQL credentials
-write-host ""
+# 4. Prompt for SQL credentials
+Write-Host ""
 $sqlUser = ""
 while ([string]::IsNullOrWhiteSpace($sqlUser)) {
-    $sqlUser = Read-Host "Enter the SQL username for the dedicated SQL pool"
+    $sqlUser = Read-Host "Enter the SQL admin username for the dedicated SQL pool '$sqlPoolName'"
     if ([string]::IsNullOrWhiteSpace($sqlUser)) {
-        Write-Output "SQL username cannot be empty. Please enter a valid username."
+        Write-Warning "SQL username cannot be empty. Please enter a valid username."
     }
 }
 
 $sqlPassword = ""
 while ([string]::IsNullOrWhiteSpace($sqlPassword)) {
-    $sqlPassword = Read-Host "Enter the password for user '$sqlUser'"
+    # Password will be visible during input
+    $sqlPassword = Read-Host "Enter the password for user '$sqlUser' (password will be visible)"
     if ([string]::IsNullOrWhiteSpace($sqlPassword)) {
-        Write-Output "Password cannot be empty. Please enter a valid password."
+        Write-Warning "Password cannot be empty. Please enter a valid password."
     }
 }
+Write-Output "Credentials for user '$sqlUser' accepted."
 
 # Test connection to SQL pool
-Write-Host "Testing connection to SQL pool..."
-$serverName = "$synapseWorkspaceName-ondemand.sql.azuresynapse.net"
-$dedicatedServerName = "$synapseWorkspaceName.sql.azuresynapse.net"
-
+Write-Host "Testing connection to SQL pool '$sqlPoolName' on server '$dedicatedServerName'..."
 try {
-    # Test connection using sqlcmd with modern syntax
-    $testQuery = "SELECT 1 as TestConnection"
-    $result = sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $sqlPoolName -Q $testQuery -h -1 -C
+    $testQuery = "SELECT GETDATE() as CurrentTime;" # A simple query
+    # Use -b to ensure sqlcmd exits on error, -t for timeout
+    sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $sqlPoolName -Q $testQuery -h -1 -b -t 60 -I
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "Connection successful!"
-    }
-    else {
-        Write-Host "Connection failed. Please check your credentials and ensure the SQL pool is online."
-        Write-Host "Server: $dedicatedServerName"
-        Write-Host "Database: $sqlPoolName"
-        Write-Host "User: $sqlUser"
+        Write-Host "Connection to SQL pool '$sqlPoolName' successful!"
+    } else {
+        Write-Error "Connection to SQL pool '$sqlPoolName' failed. SQLCMD Exit Code: $LASTEXITCODE. Please check credentials, server name, database name, and ensure the SQL pool is online and accessible."
         Exit
     }
-}
-catch {
-    Write-Host "Error testing connection: $($_.Exception.Message)"
+} catch {
+    Write-Error "Error testing connection to SQL pool '$sqlPoolName': $($_.Exception.Message)"
     Exit
 }
 
-# Prompt for database name
-write-host ""
-$databaseName = ""
-while ([string]::IsNullOrWhiteSpace($databaseName)) {
-    $databaseName = Read-Host "Enter the name for the new database (or existing database to use)"
-    if ([string]::IsNullOrWhiteSpace($databaseName)) {
-        Write-Output "Database name cannot be empty. Please enter a valid name."
-    }
-}
+# THE DATABASE NAME IS THE SQL POOL NAME FOR DEDICATED SQL POOLS
+# No separate database name input needed. We use $sqlPoolName.
 
-# Create database if setup.sql exists
-if (Test-Path "setup.sql") {
-    Write-Host "Creating/setting up database '$databaseName'..."
-    sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $sqlPoolName -Q "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '$databaseName') CREATE DATABASE [$databaseName]" -C
-    sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $databaseName -i setup.sql -C
-    Write-Host "Database setup completed."
-}
-else {
-    Write-Host "setup.sql file not found. Skipping database schema setup."
-    # Create database anyway
-    sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $sqlPoolName -Q "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '$databaseName') CREATE DATABASE [$databaseName]" -C
-    Write-Host "Database '$databaseName' created."
+# Create/setup database schema using setup.sql if it exists
+# The "database" for a dedicated SQL pool is the pool itself.
+$setupSqlPath = "./setup.sql"
+if (Test-Path $setupSqlPath) {
+    Write-Host "Running setup script '$setupSqlPath' on database (SQL Pool) '$sqlPoolName'..."
+    try {
+        # -d $sqlPoolName targets the dedicated SQL pool
+        sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $sqlPoolName -i $setupSqlPath -b -t 300 -I
+        Write-Host "Database setup script '$setupSqlPath' completed successfully on '$sqlPoolName'."
+    } catch {
+        Write-Error "Error running setup script '$setupSqlPath' on '$sqlPoolName': $($_.Exception.Message). SQLCMD Exit Code: $LASTEXITCODE"
+    }
+} else {
+    Write-Warning "Setup script '$setupSqlPath' not found. Skipping database schema setup."
 }
 
 # Load data if data files exist
-if (Test-Path "./data/*.txt") {
-    Write-Host "Loading data into database '$databaseName'..."
-    Get-ChildItem "./data/*.txt" -File | Foreach-Object {
-        write-host ""
+$dataPath = "./data"
+if (Get-ChildItem -Path "$dataPath/*.txt" -File -ErrorAction SilentlyContinue) {
+    Write-Host "Loading data into database (SQL Pool) '$sqlPoolName'..."
+    Get-ChildItem -Path "$dataPath/*.txt" -File | ForEach-Object {
         $file = $_.FullName
-        Write-Host "Loading file: $file"
-        $table = $_.Name.Replace(".txt","")
-        
-        # Check if format file exists
-        $formatFile = $file.Replace("txt", "fmt")
-        if (Test-Path $formatFile) {
-            bcp dbo.$table in $file -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $databaseName -f $formatFile -q -k -E -b 5000
-        }
-        else {
-            Write-Host "Format file not found for $table. Using default format."
-            bcp dbo.$table in $file -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $databaseName -c -t"," -q -k -E -b 5000
+        $tableName = $_.Name.Replace(".txt", "")
+        $formatFile = $file.Replace(".txt", ".fmt")
+
+        Write-Host ""
+        Write-Host "Attempting to load data from '$file' into table 'dbo.$tableName'..."
+        try {
+            if (Test-Path $formatFile) {
+                Write-Host "Using format file: $formatFile"
+                bcp "dbo.$tableName" in "$file" -S $dedicatedServerName -U $sqlUser -P "$sqlPassword" -d "$sqlPoolName" -f "$formatFile" -q -k -E -b 5000 -t # Added -t for timeout
+            } else {
+                Write-Warning "Format file '$formatFile' not found for '$file'. Using default comma-separated format (-c -t,)."
+                bcp "dbo.$tableName" in "$file" -S $dedicatedServerName -U $sqlUser -P "$sqlPassword" -d "$sqlPoolName" -c -t"," -q -k -E -b 5000 -t # Added -t for timeout
+            }
+             if ($LASTEXITCODE -eq 0) {
+                Write-Host "Successfully loaded data into 'dbo.$tableName'."
+            } else {
+                Write-Error "BCP command failed for table 'dbo.$tableName' with exit code $LASTEXITCODE."
+            }
+        } catch {
+            Write-Error "Error loading data into 'dbo.$tableName' using BCP: $($_.Exception.Message)"
         }
     }
-    Write-Host "Data loading completed."
-}
-else {
-    Write-Host "No data files found in ./data/ directory. Skipping data loading."
+    Write-Host "Data loading process completed."
+} else {
+    Write-Warning "No data files (*.txt) found in '$dataPath' directory. Skipping data loading."
 }
 
 # Upload solution script if it exists
-if (Test-Path "Solution.sql") {
-    Write-Host "Uploading solution script..."
+$solutionScriptPath = "./Solution.sql"
+$solutionScriptNameInSynapse = "SolutionUploaded_$(Get-Date -Format 'yyyyMMddHHmmss')" # Make script name unique in Synapse
+
+if (Test-Path $solutionScriptPath) {
+    Write-Host "Uploading solution script '$solutionScriptPath' as '$solutionScriptNameInSynapse' to Synapse workspace '$synapseWorkspaceName' associated with SQL Pool '$sqlPoolName'..."
     try {
-        Set-AzSynapseSqlScript -WorkspaceName $synapseWorkspaceName -DefinitionFile "Solution.sql" -sqlPoolName $sqlPoolName -sqlDatabaseName $databaseName
-        Write-Host "Solution script uploaded successfully."
+        # For dedicated SQL pools, you associate the script with the pool.
+        # The -SqlDatabaseName parameter for Set-AzSynapseSqlScript might be more relevant for serverless SQL.
+        # However, if it's required for dedicated as well, using $sqlPoolName is appropriate.
+        $sqlPoolObject = Get-AzSynapseSqlPool -ResourceGroupName $resourceGroupName -WorkspaceName $synapseWorkspaceName -Name $sqlPoolName
+        Set-AzSynapseSqlScript -WorkspaceName $synapseWorkspaceName -Name $solutionScriptNameInSynapse -DefinitionFile $solutionScriptPath -SqlPool $sqlPoolObject -ErrorAction Stop
+        Write-Host "Solution script '$solutionScriptNameInSynapse' uploaded successfully."
+    } catch {
+        Write-Error "Failed to upload solution script '$solutionScriptPath'."
+        Write-Error $_.Exception.Message
     }
-    catch {
-        Write-Host "Warning: Could not upload solution script. Error: $($_.Exception.Message)"
-    }
-}
-else {
-    Write-Host "Solution.sql file not found. Skipping script upload."
+} else {
+    Write-Warning "Solution script '$solutionScriptPath' not found. Skipping script upload."
 }
 
 Write-Host ""
 Write-Host "=== Summary ==="
 Write-Host "Resource Group: $resourceGroupName"
 Write-Host "Synapse Workspace: $synapseWorkspaceName"
-Write-Host "SQL Pool: $sqlPoolName"
-Write-Host "Database: $databaseName"
-Write-Host "Server: $dedicatedServerName"
+Write-Host "Dedicated SQL Pool (Database): $sqlPoolName"
+Write-Host "SQL Server Endpoint: $dedicatedServerName"
+Write-Host "SQL User: $sqlUser"
 Write-Host ""
-write-host "Script completed at $(Get-Date)"
+Write-Host "Script completed at $(Get-Date)"
