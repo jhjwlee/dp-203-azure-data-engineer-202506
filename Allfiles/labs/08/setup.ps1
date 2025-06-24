@@ -253,11 +253,11 @@ foreach ($provider in $provider_list){
         Write-Host "Registering $provider..."
         try {
             Register-AzResourceProvider -ProviderNamespace $provider -ErrorAction Stop
-            # 실제 등록 완료까지 시간이 걸릴 수 있으므로, 상태를 주기적으로 확인하는 로직이 필요할 수 있으나 여기서는 생략.
             Write-Host "$provider registration initiated. Current status: $((Get-AzResourceProvider -ProviderNamespace $provider).RegistrationState)"
         } catch {
-	    $errorMessage = $_.Exception.Message # 변수에 먼저 할당
-            Write-Warning "Failed to register provider '$provider': $errorMessage" # 작은따옴표로 감싸고 변수 사용
+            # 수정된 부분: $_.Exception.Message를 더 안전하게 참조하고 $provider를 따옴표로 감쌈
+            $errorMessage = $_.Exception.Message
+            Write-Warning "Failed to register provider '$provider': $errorMessage"
         }
     } else {
         Write-Host "$provider is already registered."
@@ -331,25 +331,30 @@ if (-not (Test-Path $dataFolderPath -PathType Container)) {
         $bcpArgumentList = @(
             "dbo.$tableName", 
             "in", 
-            $textFile,  # 따옴표는 Start-Process가 자동으로 처리하거나, 필요시 ArgumentList 문자열 자체에 포함
+            $textFile,
             "-S", $synapseSqlEndpoint,
             "-U", $sqlUser,
-            "-P", $sqlPassword, # Start-Process는 암호를 안전하게 처리하지 않으므로 주의. 실제 운영시 다른 방법 고려.
+            "-P", $sqlPassword,
             "-d", $sqlPoolName,
             "-f", $formatFile,
-            "-q",             # Quoted Identifier
-            "-k",             # Keep Nulls
-            "-E",             # Keep Identity
-            "-b", "5000",     # Batch Size
-            "-e", "$($textFile).err" # Error File
+            "-q",
+            "-k",
+            "-E",
+            "-b", "5000",
+            "-e", "$($textFile).err"
         )
         
-        $fullBcpCommandForDisplay = "$bcpExecutablePath " + ($bcpArgumentList -join ' ') # 표시용 (암호 제외하고 표시하는 것이 좋음)
-        Write-Host "Constructed BCP command (for display, password omitted): $($fullBcpCommandForDisplay.Replace("-P `"$sqlPassword`"", "-P ********"))"
+        # 표시용 명령어 생성 (암호 마스킹)
+        $bcpArgumentListForDisplay = $bcpArgumentList.Clone() # 배열 복제
+        $passwordIndex = $bcpArgumentListForDisplay.IndexOf("-P") + 1
+        if ($passwordIndex -gt 0 -and $passwordIndex -lt $bcpArgumentListForDisplay.Length) {
+            $bcpArgumentListForDisplay[$passwordIndex] = "********" # 암호 마스킹
+        }
+        $fullBcpCommandForDisplay = "$bcpExecutablePath " + ($bcpArgumentListForDisplay -join ' ')
+        Write-Host "Constructed BCP command (for display): $fullBcpCommandForDisplay"
 
 
         try {
-            # Start-Process를 사용하여 bcp 실행. ArgumentList는 각 인수를 개별 요소로 전달.
             $process = Start-Process -FilePath $bcpExecutablePath -ArgumentList $bcpArgumentList -Wait -PassThru -NoNewWindow -ErrorAction Stop
             
             if ($process.ExitCode -ne 0) {
@@ -360,11 +365,10 @@ if (-not (Test-Path $dataFolderPath -PathType Container)) {
                         $errorMessage += "`nBCP error file ('$($textFile).err') content:`n$errorFileContent"
                     }
                 }
-                throw $errorMessage # 예외를 발생시켜 catch 블록으로 전달
+                throw $errorMessage
             }
             
             Write-Host "Data loading for '$tableName' completed successfully."
-            # 성공 시 오류 파일이 비어있으면 삭제
             if (Test-Path "$($textFile).err") {
                 $errFileInfo = Get-Item "$($textFile).err"
                 if ($errFileInfo.Length -eq 0) {
@@ -376,8 +380,7 @@ if (-not (Test-Path $dataFolderPath -PathType Container)) {
             }
         } catch {
             Write-Error "Error during bcp for table '$tableName' with file '$textFile': $($_.Exception.Message)"
-            # 이미 throw된 예외 메시지에 bcp 오류 파일 내용이 포함되었을 수 있음
-            if (Test-Path "$($textFile).err" -and $_.Exception.Message -notmatch "BCP error file") { # 중복 출력을 피하기 위해
+            if (Test-Path "$($textFile).err" -and ($_.Exception.Message -notmatch "BCP error file" -or $_.Exception.Message -notmatch "$($textFile).err") ) {
                 Write-Warning "Content of BCP error file '$($textFile).err':"
                 Get-Content "$($textFile).err" -Raw -ErrorAction SilentlyContinue | Write-Warning
             }
