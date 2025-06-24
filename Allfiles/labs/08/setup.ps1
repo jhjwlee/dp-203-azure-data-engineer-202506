@@ -183,14 +183,17 @@ $serverName = "$synapseWorkspaceName-ondemand.sql.azuresynapse.net"
 $dedicatedServerName = "$synapseWorkspaceName.sql.azuresynapse.net"
 
 try {
-    # Test connection using sqlcmd
+    # Test connection using sqlcmd with modern syntax
     $testQuery = "SELECT 1 as TestConnection"
-    $result = sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $sqlPoolName -Q $testQuery -h -1 -W
+    $result = sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $sqlPoolName -Q $testQuery -h -1 -C
     if ($LASTEXITCODE -eq 0) {
         Write-Host "Connection successful!"
     }
     else {
-        Write-Host "Connection failed. Please check your credentials."
+        Write-Host "Connection failed. Please check your credentials and ensure the SQL pool is online."
+        Write-Host "Server: $dedicatedServerName"
+        Write-Host "Database: $sqlPoolName"
+        Write-Host "User: $sqlUser"
         Exit
     }
 }
@@ -212,14 +215,14 @@ while ([string]::IsNullOrWhiteSpace($databaseName)) {
 # Create database if setup.sql exists
 if (Test-Path "setup.sql") {
     Write-Host "Creating/setting up database '$databaseName'..."
-    sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $sqlPoolName -Q "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '$databaseName') CREATE DATABASE [$databaseName]"
-    sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $databaseName -I -i setup.sql
+    sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $sqlPoolName -Q "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '$databaseName') CREATE DATABASE [$databaseName]" -C
+    sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $databaseName -i setup.sql -C
     Write-Host "Database setup completed."
 }
 else {
     Write-Host "setup.sql file not found. Skipping database schema setup."
     # Create database anyway
-    sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $sqlPoolName -Q "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '$databaseName') CREATE DATABASE [$databaseName]"
+    sqlcmd -S $dedicatedServerName -U $sqlUser -P $sqlPassword -d $sqlPoolName -Q "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '$databaseName') CREATE DATABASE [$databaseName]" -C
     Write-Host "Database '$databaseName' created."
 }
 
