@@ -3,30 +3,71 @@
 Clear-Host
 write-host "Starting script at $(Get-Date)"
 
-# --- 모듈 설치 함수 ---
-Function Install-Module-If-Missing {
+# --- 모듈 설치 및 오류 처리 함수 ---
+Function Install-Module-And-Handle-Error {
     param(
         [string]$ModuleName,
         [string]$MinimumVersion = $null
     )
-    $moduleInstalled = Get-Module -ListAvailable -Name $ModuleName
-    if ($moduleInstalled -and ($MinimumVersion -eq $null -or $moduleInstalled.Version -ge [version]$MinimumVersion) ) {
-        Write-Host "$ModuleName module is already available (Version: $($moduleInstalled.Version))."
-    } else {
-        if ($moduleInstalled) {
-            Write-Host "Found $ModuleName module version $($moduleInstalled.Version), but require at least $MinimumVersion. Updating..."
-        } else {
-            Write-Host "Installing $ModuleName module..."
-        }
+    try {
+        Write-Host "Attempting to install/update $ModuleName (Minimum Version: $MinimumVersion)..."
+        Install-Module -Name $ModuleName -MinimumVersion $MinimumVersion -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
+        Write-Host "$ModuleName module installed/updated successfully."
+    }
+    catch {
+        Write-Error "Failed to install/update $ModuleName module: $($_.Exception.Message)"
+        Write-Warning "Please ensure PowerShellGet is up-to-date (Install-Module PowerShellGet -Force) and try again, or install the module manually."
+        exit
+    }
+}
+
+# --- 모듈 확인 및 설치 함수 ---
+Function Install-Module-If-Missing {
+    param(
+        [string]$ModuleName,
+        [string]$MinimumVersion = $null # 문자열로 받되, 내부에서 [version]으로 변환
+    )
+    $moduleInfo = Get-Module -ListAvailable -Name $ModuleName | Sort-Object -Property Version -Descending | Select-Object -First 1
+
+    if ($moduleInfo -and $moduleInfo.Version) {
+        $currentVersionString = $moduleInfo.Version
+        $currentVersionObject = $null
         try {
-            Install-Module -Name $ModuleName -MinimumVersion $MinimumVersion -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
-            Write-Host "$ModuleName module installed/updated successfully."
+            $currentVersionObject = [version]$currentVersionString
         }
         catch {
-            Write-Error "Failed to install/update $ModuleName module: $($_.Exception.Message)"
-            Write-Warning "Please ensure PowerShellGet is up-to-date (Install-Module PowerShellGet -Force) and try again, or install the module manually."
-            exit
+            Write-Warning "Could not parse current version '$currentVersionString' for module $ModuleName as a valid version object."
+            # 버전 파싱 실패 시, MinimumVersion이 지정되어 있다면 일단 업데이트/설치 시도 (최신 버전으로)
+            if ($MinimumVersion -ne $null) {
+                Write-Host "Attempting to install/update $ModuleName to ensure minimum version $MinimumVersion is met due to parsing issue of current version."
+                Install-Module-And-Handle-Error -ModuleName $ModuleName -MinimumVersion $MinimumVersion
+            } else {
+                # MinimumVersion이 없으면, 현재 버전 파싱 실패해도 일단 설치된 것으로 간주 (단, 경고는 표시)
+                Write-Host "$ModuleName is available, but its version '$currentVersionString' could not be parsed. Assuming it's usable if no minimum version is specified."
+            }
+            return # 더 이상 진행하지 않음
         }
+        
+        Write-Host "$ModuleName module is available (Version: $currentVersionObject)."
+        
+        if ($MinimumVersion -ne $null) { # MinimumVersion이 제공된 경우에만 버전 비교
+            $minimumVersionObject = $null
+            try {
+                $minimumVersionObject = [version]$MinimumVersion
+            }
+            catch {
+                Write-Warning "The provided MinimumVersion '$MinimumVersion' for module $ModuleName is not a valid version string. Skipping update based on version comparison."
+                return # MinimumVersion 파싱 실패 시, 업데이트 로직 건너뜀
+            }
+
+            if ($currentVersionObject -lt $minimumVersionObject) {
+                Write-Host "Current version $currentVersionObject is less than minimum required version $minimumVersionObject. Updating..."
+                Install-Module-And-Handle-Error -ModuleName $ModuleName -MinimumVersion $MinimumVersion
+            }
+        }
+    } else {
+        Write-Host "$ModuleName module not found or version information is invalid. Installing..."
+        Install-Module-And-Handle-Error -ModuleName $ModuleName -MinimumVersion $MinimumVersion
     }
 }
 
