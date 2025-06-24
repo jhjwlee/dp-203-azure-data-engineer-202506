@@ -256,7 +256,8 @@ foreach ($provider in $provider_list){
             # 실제 등록 완료까지 시간이 걸릴 수 있으므로, 상태를 주기적으로 확인하는 로직이 필요할 수 있으나 여기서는 생략.
             Write-Host "$provider registration initiated. Current status: $((Get-AzResourceProvider -ProviderNamespace $provider).RegistrationState)"
         } catch {
-            Write-Warning "Failed to register provider $provider: $($_.Exception.Message)"
+	    $errorMessage = $_.Exception.Message # 변수에 먼저 할당
+            Write-Warning "Failed to register provider '$provider': $errorMessage" # 작은따옴표로 감싸고 변수 사용
         }
     } else {
         Write-Host "$provider is already registered."
