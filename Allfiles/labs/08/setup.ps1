@@ -177,8 +177,6 @@ while ($complexPassword -ne 1)
     }
 }
 
-$newSqlDatabaseName = Read-Host "Enter the name for the NEW database to be created in the SQL Pool (e.g., SalesDB) - Note: For Dedicated SQL Pool, this might be used as a schema name by setup.sql"
-
 # --- 리소스 프로바이더 등록 (필요시 유지) ---
 Write-Host "Registering resource providers (if not already registered)...";
 $provider_list = "Microsoft.Synapse", "Microsoft.Sql", "Microsoft.Storage", "Microsoft.Compute"
@@ -225,7 +223,7 @@ if ($userName) {
 $sqlPoolServerName = "$synapseWorkspaceName.sql.azuresynapse.net" # Dedicated SQL Pool Endpoint
 
 Write-Host "The selected Dedicated SQL Pool '$sqlPoolName' on server '$sqlPoolServerName' will be used as the target database."
-Write-Host "The name '$newSqlDatabaseName' provided earlier might be used by 'setup.sql' for schema creation or other logical structuring if 'setup.sql' is designed that way."
+Write-Host "All tables and data will be created/loaded directly within this pool."
 
 # setup.sql 실행 (테이블 생성 등)
 $setupSqlPath = Join-Path $PSScriptRoot "setup.sql" # 스크립트 파일과 동일한 디렉터리에 있는 setup.sql 경로
